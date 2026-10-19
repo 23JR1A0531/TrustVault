@@ -1,0 +1,36 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, Arial, sans-serif;
+  background: #0b1120;
+  color: #f8fafc;
+}
+
+main {
+  max-width: 800px;
+  margin: 120px auto;
+  padding: 40px;
+  text-align: center;
+  background: #111c32;
+  border: 1px solid #263650;
+  border-radius: 16px;
+}
+
+h1 {
+  color: #60a5fa;
+  font-size: 42px;
+}
+
+p {
+  color: #cbd5e1;
+}
+
+.status {
+  margin-top: 28px;
+  padding: 14px;
+  background: #172b46;
+  border-radius: 8px;
+}
