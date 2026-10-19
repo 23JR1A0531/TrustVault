@@ -995,16 +995,27 @@ def get_document(document_id):
             user = current_user_record(cursor)
             document = allowed_document(cursor, user, document_id, "read")
 
+
             if not document:
+                cursor.execute(
+                    "SELECT 1 FROM documents WHERE id = %s",
+                    (document_id,),
+                )
+                document_exists = cursor.fetchone() is not None
                 audit(
                     cursor,
                     user["id"] if user else None,
-                    document_id,
+                    document_id if document_exists else None,
                     "document_view",
                     "denied",
+                    {} if document_exists else {
+                        "requested_document_id": document_id
+                    },
                 )
                 connection.commit()
-                return error_response("Document not found or access denied", 404)
+                return error_response(
+                    "Document not found or access denied", 404
+                )
 
             audit(cursor, user["id"], document_id, "document_view", "success")
 
@@ -1035,16 +1046,27 @@ def download_document(document_id):
             user = current_user_record(cursor)
             document = allowed_document(cursor, user, document_id, "read")
 
+
             if not document:
+                cursor.execute(
+                    "SELECT 1 FROM documents WHERE id = %s",
+                    (document_id,),
+                )
+                document_exists = cursor.fetchone() is not None
                 audit(
                     cursor,
                     user["id"] if user else None,
-                    document_id,
+                    document_id if document_exists else None,
                     "document_download",
                     "denied",
+                    {} if document_exists else {
+                        "requested_document_id": document_id
+                    },
                 )
                 connection.commit()
-                return error_response("Document not found or access denied", 404)
+                return error_response(
+                    "Document not found or access denied", 404
+                )
 
             file_path = (STORAGE_DIR / document["storage_key"]).resolve()
             if file_path.parent != STORAGE_DIR or not file_path.is_file():
