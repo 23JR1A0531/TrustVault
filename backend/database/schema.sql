@@ -1,3 +1,5 @@
+
+CREATE DATABASE IF NOT EXISTS trustvault;
 USE trustvault;
 
 CREATE TABLE users (
@@ -7,6 +9,7 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('admin', 'owner', 'viewer') NOT NULL DEFAULT 'viewer',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    token_version INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
