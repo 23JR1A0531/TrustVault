@@ -231,3 +231,146 @@ def test_document_access_denied_returns_404(monkeypatch):
 
     assert response.status_code == 404
     assert response.get_json()["error"] == "Document not found or access denied"
+
+def test_authorized_user_can_view_document(monkeypatch):
+    from datetime import datetime
+
+    class FakeConnection:
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, query, params):
+            pass
+
+        def fetchone(self):
+            return {
+                "id": 2,
+                "name": "Viewer",
+                "email": "viewer@example.com",
+                "role": "viewer",
+                "is_active": 1,
+                "token_version": 0,
+            }
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    document = {
+        "id": 10,
+        "owner_id": 1,
+        "title": "Authorized Test Document",
+        "category": "Testing",
+        "description": "Authorization test",
+        "original_filename": "test.pdf",
+        "mime_type": "application/pdf",
+        "file_size": 100,
+        "created_at": datetime(2026, 1, 1),
+        "updated_at": datetime(2026, 1, 1),
+    }
+
+    monkeypatch.setattr(
+        trustvault_app,
+        "get_db_connection",
+        lambda: FakeConnection(),
+    )
+    monkeypatch.setattr(
+        trustvault_app,
+        "allowed_document",
+        lambda cursor, user, document_id, permission="read": document,
+    )
+    monkeypatch.setattr(
+        trustvault_app,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+
+    with trustvault_app.app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(
+            identity="2",
+            additional_claims={"token_version": 0},
+        )
+
+    client = trustvault_app.app.test_client()
+    response = client.get(
+        "/api/documents/10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["document"]
+    assert result["title"] == "Authorized Test Document"
+    assert result["owner_id"] == 1
+
+def test_document_download_denied_returns_404(monkeypatch):
+    class FakeConnection:
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, query, params):
+            pass
+
+        def fetchone(self):
+            return {
+                "id": 2,
+                "name": "Viewer",
+                "email": "viewer@example.com",
+                "role": "viewer",
+                "is_active": 1,
+                "token_version": 0,
+            }
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        trustvault_app,
+        "get_db_connection",
+        lambda: FakeConnection(),
+    )
+    monkeypatch.setattr(
+        trustvault_app,
+        "allowed_document",
+        lambda cursor, user, document_id, permission="read": None,
+    )
+    monkeypatch.setattr(
+        trustvault_app,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+
+    with trustvault_app.app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(
+            identity="2",
+            additional_claims={"token_version": 0},
+        )
+
+    client = trustvault_app.app.test_client()
+    response = client.get(
+        "/api/documents/999/download",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "Document not found or access denied"
