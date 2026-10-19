@@ -1643,6 +1643,113 @@ def audit_logs():
             connection.close()
 
 
+@app.get("/api/admin/audit/verify")
+@jwt_required()
+def verify_audit_chain():
+    connection = None
+    try:
+        connection = get_db_connection()
+
+        with connection.cursor() as cursor:
+            user = current_user_record(cursor)
+            if not require_role(user, "admin"):
+                return error_response("Admin access required", 403)
+
+            cursor.execute(
+                """
+                SELECT id, actor_id, document_id, action, outcome,
+                       details, previous_hash, entry_hash
+                FROM audit_logs
+                ORDER BY id ASC
+                """
+            )
+            logs = cursor.fetchall()
+
+            cursor.execute(
+                "SELECT last_hash FROM audit_chain_head WHERE id = 1"
+            )
+            head = cursor.fetchone()
+
+        if head is None:
+            return jsonify({
+                "valid": False,
+                "checked_entries": len(logs),
+                "error": "Audit chain head is missing",
+            }), 200
+
+        expected_previous_hash = None
+        checked_entries = 0
+
+        for log in logs:
+            stored_previous_hash = log["previous_hash"]
+
+            if stored_previous_hash != expected_previous_hash:
+                return jsonify({
+                    "valid": False,
+                    "checked_entries": checked_entries,
+                    "invalid_entry_id": log["id"],
+                    "error": "Previous hash mismatch",
+                }), 200
+
+            details = log["details"]
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except (TypeError, ValueError):
+                    return jsonify({
+                        "valid": False,
+                        "checked_entries": checked_entries,
+                        "invalid_entry_id": log["id"],
+                        "error": "Invalid audit details JSON",
+                    }), 200
+
+            payload = {
+                "actor_id": log["actor_id"],
+                "document_id": log["document_id"],
+                "action": log["action"],
+                "outcome": log["outcome"],
+                "details": details or {},
+                "previous_hash": stored_previous_hash,
+            }
+
+            canonical = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            calculated_hash = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+
+            if calculated_hash != log["entry_hash"]:
+                return jsonify({
+                    "valid": False,
+                    "checked_entries": checked_entries,
+                    "invalid_entry_id": log["id"],
+                    "error": "Entry hash mismatch",
+                }), 200
+
+            expected_previous_hash = log["entry_hash"]
+            checked_entries += 1
+
+        if head["last_hash"] != expected_previous_hash:
+            return jsonify({
+                "valid": False,
+                "checked_entries": checked_entries,
+                "error": "Audit chain head mismatch",
+            }), 200
+
+        return jsonify({
+            "valid": True,
+            "checked_entries": checked_entries,
+            "message": "Audit hash chain verified successfully",
+        }), 200
+
+    finally:
+        if connection:
+            connection.close()
+
 @app.errorhandler(413)
 def request_too_large(_error):
     return error_response("Request too large (maximum 10 MB)", 413)
