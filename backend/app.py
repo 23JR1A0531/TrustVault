@@ -907,6 +907,11 @@ def list_documents():
     connection = None
     try:
         connection = get_db_connection()
+
+        # Optional search query: title, category, description, filename
+        search = request.args.get("search", "").strip()
+        search_pattern = f"%{search}%"
+
         with connection.cursor() as cursor:
             user = current_user_record(cursor)
             if not user or not user["is_active"]:
@@ -934,28 +939,46 @@ def list_documents():
                 LEFT JOIN department_memberships dm
                     ON dm.department_id = dp.department_id
                     AND dm.user_id = %s
-                WHERE d.owner_id = %s
-                   OR p.permission IN ('read', 'edit')
-                   OR (
-                       gm.user_id IS NOT NULL
-                       AND gp.permission IN ('read', 'edit')
-                   )
-                   OR (
-                       dm.user_id IS NOT NULL
-                       AND dp.permission IN ('read', 'edit')
-                   )
+                WHERE (
+                    d.owner_id = %s
+                    OR p.permission IN ('read', 'edit')
+                    OR (
+                        gm.user_id IS NOT NULL
+                        AND gp.permission IN ('read', 'edit')
+                    )
+                    OR (
+                        dm.user_id IS NOT NULL
+                        AND dp.permission IN ('read', 'edit')
+                    )
+                )
+                AND (
+                    %s = ''
+                    OR d.title LIKE %s
+                    OR d.category LIKE %s
+                    OR d.description LIKE %s
+                    OR d.original_filename LIKE %s
+                )
                 ORDER BY d.created_at DESC
                 """,
-                (user["id"], user["id"], user["id"], user["id"]),
+                (
+                    user["id"],
+                    user["id"],
+                    user["id"],
+                    user["id"],
+                    search,
+                    search_pattern,
+                    search_pattern,
+                    search_pattern,
+                    search_pattern,
+                ),
             )
             documents = cursor.fetchall()
 
-        return jsonify({"documents": documents})
+        return jsonify({"documents": documents}), 200
 
     finally:
         if connection:
             connection.close()
-
 
 @app.get("/api/documents/<int:document_id>")
 @jwt_required()
