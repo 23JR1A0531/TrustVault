@@ -815,6 +815,7 @@ def remove_group_member(group_id, user_id):
 def upload_document():
     connection = None
     stored_path = None
+    upload_succeeded = False
 
     try:
         user_id = int(get_jwt_identity())
@@ -883,6 +884,7 @@ def upload_document():
             )
 
         connection.commit()
+        upload_succeeded = True
         return jsonify({
             "id": document_id,
             "message": "Document uploaded",
@@ -899,6 +901,9 @@ def upload_document():
     finally:
         if connection:
             connection.close()
+
+        if not upload_succeeded and stored_path and stored_path.exists():
+            stored_path.unlink(missing_ok=True)
 
 
 @app.get("/api/documents")
@@ -1592,6 +1597,7 @@ def revoke_department_permission(document_id, department_id):
             )
 
             if cursor.rowcount == 0:
+                connection.rollback()
                 return error_response("Department permission not found", 404)
 
             audit(
