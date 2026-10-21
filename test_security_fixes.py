@@ -74,7 +74,6 @@ def test_upload_failure_removes_saved_file(monkeypatch, tmp_path):
 
     app = trustvault.app
     app.config["TESTING"] = True
-
     stored_file = tmp_path / "failed-upload"
     stored_file.write_bytes(b"%PDF-test")
 
@@ -174,3 +173,83 @@ def test_upload_database_failure_cleans_up_file(monkeypatch, tmp_path):
 
     assert response.status_code == 500
     assert list(tmp_path.iterdir()) == []
+def test_document_delete_returns_pending_when_file_cleanup_fails(
+    monkeypatch, tmp_path
+):
+    from flask_jwt_extended import create_access_token
+
+    app = trustvault.app
+    app.config["TESTING"] = True
+    monkeypatch.setattr(
+        trustvault.jwt,
+        "_token_in_blocklist_callback",
+        lambda _jwt_header, _jwt_payload: False,
+    )
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, query, params=None):
+            if "SELECT * FROM documents" in query:
+                self.result = {
+                    "id": 1,
+                    "owner_id": 1,
+                    "storage_key": "document.pdf",
+                    "title": "Test document",
+                }
+            else:
+                self.result = None
+
+        def fetchone(self):
+            return self.result
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        trustvault, "get_db_connection", lambda: FakeConnection()
+    )
+    monkeypatch.setattr(
+        trustvault, "current_user_record",
+        lambda cursor: {"id": 1, "role": "viewer", "is_active": 1}
+    )
+    monkeypatch.setattr(trustvault, "audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trustvault, "STORAGE_DIR", tmp_path)
+
+    target = tmp_path / "document.pdf"
+    target.mkdir()
+
+    original_unlink = trustvault.Path.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        if path == target:
+            raise OSError("Simulated cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(trustvault.Path, "unlink", failing_unlink)
+
+    with app.app_context():
+        token = create_access_token(identity="1")
+
+    response = app.test_client().delete(
+        "/api/documents/1",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["file_cleanup"] == "pending"

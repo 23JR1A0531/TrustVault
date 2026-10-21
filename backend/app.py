@@ -1229,8 +1229,19 @@ def delete_document(document_id):
             )
 
         connection.commit()
-        (STORAGE_DIR / storage_key).unlink(missing_ok=True)
-        return jsonify({"message": "Document deleted"})
+        cleanup_pending = False
+        try:
+            (STORAGE_DIR / storage_key).unlink(missing_ok=True)
+        except OSError:
+            app.logger.exception(
+                "Document deleted from database, but file cleanup failed"
+            )
+            cleanup_pending = True
+
+        return jsonify({
+            "message": "Document deleted",
+            "file_cleanup": "pending" if cleanup_pending else "complete",
+        })
 
     except pymysql.MySQLError:
         if connection:
