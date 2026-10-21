@@ -321,6 +321,45 @@ def login():
         if connection:
             connection.close()
 
+@app.get("/api/auth/me")
+@jwt_required()
+def get_current_user():
+    user_id = get_jwt_identity()
+
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, email, role, is_active
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            user = cursor.fetchone()
+
+        if not user or not user["is_active"]:
+            return error_response("User not found or inactive", 401)
+
+        return jsonify({
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "role": user["role"],
+            }
+        })
+
+    except pymysql.MySQLError:
+        app.logger.exception("Fetching current user failed")
+        return error_response("Unable to fetch user details", 503)
+
+    finally:
+        if connection:
+            connection.close()
+
 
 @jwt.token_in_blocklist_loader
 def token_revoked(_header, payload):

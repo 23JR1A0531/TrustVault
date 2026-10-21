@@ -1,351 +1,395 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "./api";
+import Sidebar from "./components/Sidebar";
+import Topbar from "./components/Topbar";
+import UploadModal from "./components/UploadModal";
+import ShareModal from "./components/ShareModal";
+import ConfirmModal from "./components/ConfirmModal";
+import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+import DashboardPage from "./pages/DashboardPage";
+import DocumentsPage from "./pages/DocumentsPage";
+import GroupsPage from "./pages/GroupsPage";
+import DepartmentsPage from "./pages/DepartmentsPage";
+import AuditPage from "./pages/AuditPage";
 
-import { useState } from "react";
-import { loginUser, registerUser, getCurrentUser } from "./api";
-import "./App.css";
+const TOKEN_KEY = "trustvault_token";
 
-const INITIAL_FORM = {
-  name: "",
-  email: "john123@gmail.com",
-  password: "",
-};
+function getToken(result) {
+  return result?.access_token || result?.accessToken || result?.token || result?.data?.access_token || result?.data?.token;
+}
 
-function App() {
-  const [mode, setMode] = useState("login");
-  const [form, setForm] = useState(INITIAL_FORM);
+function getUser(result) {
+  return result?.user || result?.data?.user || result?.data || result;
+}
+
+function getError(error) {
+  return error?.message || "Something went wrong. Please try again.";
+}
+
+export default function App() {
+  const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) || "");
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [authPage, setAuthPage] = useState("login");
+  const [authError, setAuthError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState("Dashboard");
+  const [search, setSearch] = useState("");
+  const [documents, setDocuments] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [verification, setVerification] = useState(null);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [notice, setNotice] = useState("");
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [shareDocument, setShareDocument] = useState(null);
+  const [editDocument, setEditDocument] = useState(null);
+  const [deleteDocument, setDeleteDocument] = useState(null);
 
-  function updateField(event) {
-    setForm({ ...form, [event.target.name]: event.target.value });
-  }
+  const isAdmin = ["admin", "owner"].includes(String(user?.role || "").toLowerCase());
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  const logout = useCallback(async () => {
+    try {
+      if (token) await api.logout(token);
+    } catch {
+      // Clear local session even if the server logout request fails.
+    }
+    sessionStorage.removeItem(TOKEN_KEY);
+    setToken("");
+    setUser(null);
+    setDocuments([]);
+    setGroups([]);
+    setDepartments([]);
+    setLogs([]);
+    setPage("Dashboard");
+    setAuthError("");
     setError("");
-    setSuccess("");
-    setLoading(true);
+  }, [token]);
+
+  const loadData = useCallback(async (activeToken) => {
+    setError("");
+    const result = await api.documents(activeToken, search);
+    setDocuments(Array.isArray(result) ? result : result?.documents || result?.data?.documents || []);
 
     try {
-      if (mode === "register") {
-        await registerUser(form);
-        setSuccess("Account created! Please sign in.");
-        setMode("login");
-        setForm({ ...INITIAL_FORM, email: form.email });
-      } else {
-        const result = await loginUser(form);
-        const current = await getCurrentUser(result.access_token);
+      const r = await api.groups(activeToken);
+      setGroups(Array.isArray(r) ? r : r?.groups || r?.data?.groups || []);
+    } catch {
+      setGroups([]);
+    }
 
-        setUser(current.user);
+    if (["admin", "owner"].includes(String(user?.role || "").toLowerCase())) {
+      try {
+        const r = await api.departments(activeToken);
+        setDepartments(Array.isArray(r) ? r : r?.departments || r?.data?.departments || []);
+      } catch {
+        setDepartments([]);
       }
-    } catch (err) {
-      setError(err.message || "Something went wrong.");
+    }
+  }, [search, user?.role]);
+
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+
+    async function initialize() {
+      try {
+        const result = await api.me(token);
+        if (!alive) return;
+        setUser(getUser(result));
+        const docs = await api.documents(token, search);
+        if (!alive) return;
+        setDocuments(Array.isArray(docs) ? docs : docs?.documents || docs?.data?.documents || []);
+      } catch {
+        if (alive) {
+          sessionStorage.removeItem(TOKEN_KEY);
+          setToken("");
+          setUser(null);
+        }
+      }
+    }
+
+    initialize();
+    return () => { alive = false; };
+  }, [token]); // Initialize the session when the token changes.
+
+  useEffect(() => {
+    if (!token || !user) return;
+    const timer = setTimeout(() => {
+      api.documents(token, search)
+        .then((r) => setDocuments(Array.isArray(r) ? r : r?.documents || r?.data?.documents || []))
+        .catch((e) => setError(getError(e)));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [search, token, user]);
+
+  useEffect(() => {
+    if (!token || !user) return;
+    if (page === "Groups") {
+      api.groups(token)
+        .then((r) => setGroups(Array.isArray(r) ? r : r?.groups || r?.data?.groups || []))
+        .catch((e) => setError(getError(e)));
+    }
+    if (page === "Departments" && isAdmin) {
+      api.departments(token)
+        .then((r) => setDepartments(Array.isArray(r) ? r : r?.departments || r?.data?.departments || []))
+        .catch((e) => setError(getError(e)));
+    }
+    if (page === "Audit Logs" && isAdmin) {
+      api.audit(token)
+        .then((r) => setLogs(Array.isArray(r) ? r : r?.logs || r?.data?.logs || []))
+        .catch((e) => setError(getError(e)));
+    }
+  }, [page, token, user, isAdmin]);
+
+  async function handleLogin(credentials) {
+    setBusy(true);
+    setAuthError("");
+    try {
+      const result = await api.login(credentials);
+      const newToken = getToken(result);
+      if (!newToken) throw new Error("Login response did not contain an access token. Check your backend login response.");
+      sessionStorage.setItem(TOKEN_KEY, newToken);
+      setUser(getUser(result));
+      setToken(newToken);
+    } catch (e) {
+      setAuthError(getError(e));
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  function signOut() {
-    setUser(null);
-    setForm(INITIAL_FORM);
-    setError("");
-    setSuccess("");
-    setMode("login");
+  async function handleRegister(details) {
+    setBusy(true);
+    setAuthError("");
+    try {
+      await api.register(details);
+      setAuthPage("login");
+      setAuthError("Account created if registration succeeded. Please sign in.");
+    } catch (e) {
+      setAuthError(getError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function changeMode(nextMode) {
-    setMode(nextMode);
-    setError("");
-    setSuccess("");
-    setForm({ ...INITIAL_FORM });
+  async function handleUpload(formData) {
+    setBusy(true);
+    try {
+      await api.upload(token, formData);
+      setUploadOpen(false);
+      setNotice("Document uploaded successfully.");
+      await loadData(token);
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  if (user) {
-    return (
-      <div className="app-shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <span className="brand-icon">T</span>
-            TrustVault
-          </div>
+  async function handleDownload(doc) {
+    try {
+      const data = await api.download(token, doc.id);
+      const blob = data instanceof Blob ? data : new Blob([data], { type: doc.mime_type || "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = doc.original_filename || `${doc.title || "document"}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(getError(e));
+    }
+  }
 
-          <div className="side-label">WORKSPACE</div>
-          <div className="nav-item active">▦ <span>Overview</span></div>
-          <div className="nav-item">▤ <span>My Documents</span></div>
-          <div className="nav-item">♧ <span>Shared with me</span></div>
-          <div className="nav-item">◷ <span>Activity logs</span></div>
+  async function handleEditSubmit(e) {
+    e.preventDefault();
+    if (!editDocument) return;
+    setBusy(true);
+    try {
+      await api.edit(token, editDocument.id, {
+        title: editDocument.title,
+        category: editDocument.category,
+        description: editDocument.description || "",
+      });
+      setEditDocument(null);
+      setNotice("Document updated.");
+      await loadData(token);
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-          <div className="sidebar-bottom">
-            <div className="security-card">
-              <span className="security-icon">✦</span>
-              <strong>Your files, protected.</strong>
-              <p>Access is verified by the server.</p>
-            </div>
+  async function handleDelete() {
+    setBusy(true);
+    try {
+      await api.remove(token, deleteDocument.id);
+      setDeleteDocument(null);
+      setNotice("Document deleted.");
+      await loadData(token);
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-            <div className="profile">
-              <div className="avatar">
-                {user.name?.charAt(0).toUpperCase()}
-              </div>
-              <div className="profile-info">
-                <strong>{user.name}</strong>
-                <span>{user.role}</span>
-              </div>
-              <button
-                className="logout-button"
-                onClick={signOut}
-                title="Sign out"
-                aria-label="Sign out"
-              >
-                ↗
-              </button>
-            </div>
-          </div>
-        </aside>
+  async function handleShare(target, payload) {
+    setBusy(true);
+    try {
+      if (target === "user") await api.grantUser(token, shareDocument.id, payload);
+      else if (target === "group") await api.grantGroup(token, shareDocument.id, payload);
+      else await api.grantDepartment(token, shareDocument.id, payload);
+      setShareDocument(null);
+      setNotice("Sharing permission saved.");
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-        <main className="dashboard">
-          <header className="topbar">
-            <div className="breadcrumb">
-              Workspace <span>/</span> Overview
-            </div>
-            <div className="secure-status">
-              <span /> Secure session
-            </div>
-          </header>
+  async function handleCreateGroup(payload) {
+    setBusy(true);
+    try {
+      await api.createGroup(token, payload);
+      const r = await api.groups(token);
+      setGroups(Array.isArray(r) ? r : r?.groups || r?.data?.groups || []);
+      setNotice("Group created.");
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-          <section className="welcome">
-            <div>
-              <p className="eyebrow">YOUR PRIVATE WORKSPACE</p>
-              <h1>Good to see you, {user.name.split(" ")[0]}.</h1>
-              <p className="subtitle">
-                Your documents and access, all in one place.
-              </p>
-            </div>
-            <div className="welcome-mark">T<span>V</span></div>
-          </section>
+  async function handleAddGroupMember(id, payload) {
+    setBusy(true);
+    try {
+      await api.addGroupMember(token, id, payload);
+      setNotice("Group member added.");
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-          <section className="stats-grid">
-            <article className="stat-card">
-              <div className="stat-icon blue">▤</div>
-              <p>My documents</p>
-              <h2>—</h2>
-              <span>Document API not connected yet</span>
-            </article>
+  async function handleCreateDepartment(payload) {
+    setBusy(true);
+    try {
+      await api.createDepartment(token, payload);
+      const r = await api.departments(token);
+      setDepartments(Array.isArray(r) ? r : r?.departments || r?.data?.departments || []);
+      setNotice("Department created.");
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-            <article className="stat-card">
-              <div className="stat-icon violet">♧</div>
-              <p>Shared with me</p>
-              <h2>—</h2>
-              <span>Access-based document view</span>
-            </article>
+  async function handleAddDepartmentMember(payload) {
+    setBusy(true);
+    try {
+      await api.addDepartmentMember(token, payload);
+      setNotice("Department member assigned.");
+    } catch (e) {
+      setError(getError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-            <article className="stat-card">
-              <div className="stat-icon green">✓</div>
-              <p>Account status</p>
-              <h2 className="status-value">Active</h2>
-              <span>Authenticated by the server</span>
-            </article>
-          </section>
+  async function handleVerifyAudit() {
+    setBusy(true);
+    setVerification(null);
+    try {
+      const r = await api.verifyAudit(token);
+      setVerification(r?.data || r);
+    } catch (e) {
+      setVerification({ valid: false, message: getError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
 
-          <section className="content-card">
-            <div className="section-heading">
-              <div>
-                <h2>Workspace overview</h2>
-                <p>Your secure document workspace is ready.</p>
-              </div>
-              <span className="role-chip">{user.role}</span>
-            </div>
+  const filteredDocuments = useMemo(() => documents, [documents]);
 
-            <div className="empty-state">
-              <div className="empty-icon">▤</div>
-              <h3>Your workspace starts here</h3>
-              <p>
-                Document upload and permission management are the next
-                features to connect.
-              </p>
-            </div>
-          </section>
-
-          <footer className="dashboard-footer">
-            <span>
-              TrustVault <span className="footer-dot">•</span> Secure Document Sharing
-            </span>
-            <span>Signed in as {user.email}</span>
-          </footer>
-        </main>
-      </div>
+  if (!token) {
+    return authPage === "login" ? (
+      <LoginPage onLogin={handleLogin} onRegister={() => { setAuthError(""); setAuthPage("register"); }} busy={busy} error={authError} />
+    ) : (
+      <RegisterPage onRegister={handleRegister} onLogin={() => { setAuthError(""); setAuthPage("login"); }} busy={busy} error={authError} />
     );
   }
 
+  const commonDocumentProps = {
+    documents: filteredDocuments,
+    onDownload: handleDownload,
+    onEdit: setEditDocument,
+    onDelete: setDeleteDocument,
+    onShare: setShareDocument,
+  };
+
   return (
-    <main className="auth-layout">
-      <section className="auth-visual">
-        <div className="visual-brand">
-          <span className="brand-icon">T</span>
-          TrustVault
-        </div>
+    <div className="app-shell">
+      <Sidebar page={page} setPage={(p) => { setPage(p); setError(""); setNotice(""); }} user={user} onLogout={logout} />
 
-        <div className="visual-content">
-          <div className="visual-badge"><span /> PRIVATE BY DESIGN</div>
-          <h1>Your documents.<br />Your <span>control.</span></h1>
-          <p>
-            A secure workspace to organize documents, manage access,
-            and keep every important action accountable.
-          </p>
+      <main className="main-area">
+        <Topbar page={page} search={search} setSearch={setSearch} onUpload={() => setUploadOpen(true)} />
 
-          <div className="visual-features">
-            <div>
-              <span className="feature-check">✓</span>
-              <span>
-                <strong>Controlled access</strong>
-                <small>Permissions checked on every request</small>
-              </span>
-            </div>
-            <div>
-              <span className="feature-check">✓</span>
-              <span>
-                <strong>Private by default</strong>
-                <small>Your files aren't public links</small>
-              </span>
-            </div>
-            <div>
-              <span className="feature-check">✓</span>
-              <span>
-                <strong>Accountable activity</strong>
-                <small>Built for traceable document actions</small>
-              </span>
-            </div>
-          </div>
-        </div>
+        <div className="page-content">
+          {error && <div className="alert-error app-alert"><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
+          {notice && <div className="alert-success app-alert"><span>✓ {notice}</span><button onClick={() => setNotice("")}>×</button></div>}
 
-        <div className="visual-footer">
-          TRUST IS BUILT INTO EVERY REQUEST <span>© 2026</span>
-        </div>
-      </section>
-
-      <section className="auth-panel">
-        <div className="mobile-brand">
-          <span className="brand-icon">T</span>
-          TrustVault
-        </div>
-
-        <div className="auth-form-wrap">
-          <div className="form-heading">
-            <p className="eyebrow">
-              {mode === "login" ? "WELCOME BACK" : "GET STARTED"}
-            </p>
-            <h2>
-              {mode === "login"
-                ? "Sign in to your vault"
-                : "Create your account"}
-            </h2>
-            <p>
-              {mode === "login"
-                ? "Enter your details to access your workspace."
-                : "Set up your secure document workspace."}
-            </p>
-          </div>
-
-          <div className="mode-switch">
-            <button
-              type="button"
-              className={mode === "login" ? "selected" : ""}
-              onClick={() => changeMode("login")}
-            >
-              Sign in
-            </button>
-            <button
-              type="button"
-              className={mode === "register" ? "selected" : ""}
-              onClick={() => changeMode("register")}
-            >
-              Create account
-            </button>
-          </div>
-
-          {error && (
-            <div className="message error-message" role="alert">
-              {error}
-            </div>
+          {page === "Dashboard" && <DashboardPage {...commonDocumentProps} onUpload={() => setUploadOpen(true)} />}
+          {page === "Documents" && <DocumentsPage {...commonDocumentProps} />}
+          {page === "Groups" && <GroupsPage groups={groups} onCreate={handleCreateGroup} onAddMember={handleAddGroupMember} busy={busy} />}
+          {page === "Departments" && (
+            isAdmin
+              ? <DepartmentsPage departments={departments} onCreate={handleCreateDepartment} onAddMember={handleAddDepartmentMember} busy={busy} />
+              : <section className="panel"><h2>Access restricted</h2><p className="muted">Department management requires administrator permissions.</p></section>
           )}
-
-          {success && (
-            <div className="message success-message" role="status">
-              {success}
-            </div>
+          {page === "Audit Logs" && (
+            isAdmin
+              ? <AuditPage logs={logs} verification={verification} onVerify={handleVerifyAudit} busy={busy} />
+              : <section className="panel"><h2>Access restricted</h2><p className="muted">Audit logs require administrator permissions.</p></section>
           )}
+        </div>
 
-          <form onSubmit={handleSubmit}>
-            {mode === "register" && (
-              <label>
-                Full name
-                <input
-                  name="name"
-                  value={form.name}
-                  onChange={updateField}
-                  placeholder="Your full name"
-                  autoComplete="name"
-                  maxLength={100}
-                  required
-                />
-              </label>
-            )}
+        <footer className="app-footer"><span>TrustVault © {new Date().getFullYear()}</span><span>Secure document workspace</span></footer>
+      </main>
 
-            <label>
-              Email address
-              <input
-                name="email"
-                type="email"
-                value={form.email}
-                onChange={updateField}
-                placeholder="you@example.com"
-                autoComplete="email"
-                maxLength={255}
-                required
-              />
-            </label>
+      {uploadOpen && <UploadModal onClose={() => setUploadOpen(false)} onSubmit={handleUpload} busy={busy} />}
+      {shareDocument && <ShareModal document={shareDocument} onClose={() => setShareDocument(null)} onSubmit={handleShare} busy={busy} />}
 
-            <label>
-              Password
-              <input
-                name="password"
-                type="password"
-                value={form.password}
-                onChange={updateField}
-                placeholder={
-                  mode === "login" ? "Enter your password" : "At least 12 characters"
-                }
-                autoComplete={
-                  mode === "login" ? "current-password" : "new-password"
-                }
-                minLength={mode === "register" ? 12 : undefined}
-                maxLength={128}
-                required
-              />
-            </label>
-
-            <button className="submit-button" type="submit" disabled={loading}>
-              {loading
-                ? "Please wait..."
-                : mode === "login"
-                  ? "Sign in securely"
-                  : "Create account"}
-              {!loading && <span>→</span>}
-            </button>
+      {editDocument && (
+        <div className="modal-backdrop">
+          <form className="modal" onSubmit={handleEditSubmit}>
+            <div className="modal-heading"><div><h2>Edit document</h2><p>Update document details.</p></div><button type="button" className="close-btn" onClick={() => setEditDocument(null)}>×</button></div>
+            <label className="field">Title<input required value={editDocument.title || ""} onChange={(e) => setEditDocument({ ...editDocument, title: e.target.value })} /></label>
+            <label className="field">Category<input value={editDocument.category || ""} onChange={(e) => setEditDocument({ ...editDocument, category: e.target.value })} /></label>
+            <label className="field">Description<textarea rows="3" value={editDocument.description || ""} onChange={(e) => setEditDocument({ ...editDocument, description: e.target.value })} /></label>
+            <div className="modal-actions"><button type="button" className="btn btn-secondary" onClick={() => setEditDocument(null)}>Cancel</button><button className="btn btn-primary" disabled={busy}>{busy ? "Saving..." : "Save changes"}</button></div>
           </form>
-
-          <div className="form-security">
-            <span>▣</span>
-            Your account is protected by server-side authentication.
-          </div>
         </div>
+      )}
 
-        <div className="auth-bottom">
-          TrustVault <span>·</span> Secure document sharing
-        </div>
-      </section>
-    </main>
+      {deleteDocument && (
+        <ConfirmModal
+          title="Delete document?"
+          message={`"${deleteDocument.title}" will be deleted if the server authorizes this action.`}
+          onCancel={() => setDeleteDocument(null)}
+          onConfirm={handleDelete}
+          busy={busy}
+        />
+      )}
+    </div>
   );
 }
-
-export default App;
