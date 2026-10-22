@@ -1,4 +1,3 @@
-
 import hashlib
 import json
 import os
@@ -29,11 +28,17 @@ app.config["JWT_TOKEN_LOCATION"] = ["headers"]
 if not app.config.get("SECRET_KEY") or not app.config.get("JWT_SECRET_KEY"):
     raise RuntimeError("SECRET_KEY and JWT_SECRET_KEY must be configured")
 
-CORS(app, resources={
-    r"/api/*": {
-        "origins": ["http://localhost:5173", "http://localhost:5174"]
-    }
-})
+CORS(
+    app,
+    resources={r"/api/*": {
+        "origins": [
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174"
+        ]
+    }}
+)
 jwt = JWTManager(app)
 
 STORAGE_DIR = Path(app.config["STORAGE_DIR"]).resolve()
@@ -62,7 +67,7 @@ def current_user_record(cursor):
     user_id = int(get_jwt_identity())
     cursor.execute(
         """
-        SELECT id, name, email, role, is_active, token_version
+        SELECT id, name, email, role, is_active, approval_status, token_version
         FROM users WHERE id = %s
         """,
         (user_id,),
@@ -71,7 +76,7 @@ def current_user_record(cursor):
 
 
 def require_role(user, *roles):
-    return bool(user and user["is_active"] and user["role"] in roles)
+    return bool(user and user["is_active"] and user.get("approval_status", "approved") == "approved" and user["role"] in roles)
 
 
 def audit(cursor, actor_id, document_id, action, outcome, details=None):
@@ -234,21 +239,25 @@ def register():
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO users (name, email, password_hash, role)
-                VALUES (%s, %s, %s, 'viewer')
+                INSERT INTO users (name, email, password_hash, role, approval_status)
+                VALUES (%s, %s, %s, 'viewer', 'pending')
                 """,
                 (name, email, generate_password_hash(password)),
             )
             user_id = cursor.lastrowid
+            audit(cursor, None, None, "user_registered", "success", {
+                "target_user_id": user_id, "email": email, "approval_status": "pending"
+            })
 
         connection.commit()
         return jsonify({
-            "message": "Registration successful",
+            "message": "Registration submitted. Wait for admin approval before signing in.",
             "user": {
                 "id": user_id,
                 "name": name,
                 "email": email,
                 "role": "viewer",
+                "approval_status": "pending",
             },
         }), 201
 
@@ -285,19 +294,21 @@ def login():
             cursor.execute(
                 """
                 SELECT id, name, email, password_hash, role,
-                       is_active, token_version
+                       is_active, approval_status, token_version
                 FROM users WHERE email = %s
                 """,
                 (email.strip().lower(),),
             )
             user = cursor.fetchone()
 
-        if (
-            not user
-            or not user["is_active"]
-            or not check_password_hash(user["password_hash"], password)
-        ):
+        if not user or not check_password_hash(user["password_hash"], password):
             return error_response("Invalid email or password", 401)
+        if not user["is_active"]:
+            return error_response("Account is inactive. Contact the administrator.", 403)
+        if user.get("approval_status", "approved") == "pending":
+            return error_response("Your account is pending admin approval.", 403)
+        if user.get("approval_status") == "rejected":
+            return error_response("Your registration was rejected. Contact the administrator.", 403)
 
         token = create_access_token(
             identity=str(user["id"]),
@@ -310,6 +321,7 @@ def login():
                 "name": user["name"],
                 "email": user["email"],
                 "role": user["role"],
+                "approval_status": user.get("approval_status", "approved"),
             },
         })
 
@@ -368,7 +380,7 @@ def token_revoked(_header, payload):
         connection = get_db_connection()
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT token_version, is_active FROM users WHERE id = %s",
+                "SELECT token_version, is_active, approval_status FROM users WHERE id = %s",
                 (int(payload["sub"]),),
             )
             user = cursor.fetchone()
@@ -376,6 +388,7 @@ def token_revoked(_header, payload):
         return (
             not user
             or not user["is_active"]
+            or user.get("approval_status", "approved") != "approved"
             or user["token_version"] != payload.get("token_version")
         )
 
@@ -1687,6 +1700,92 @@ def revoke_department_permission(document_id, department_id):
         app.logger.exception("Department permission revoke failed")
         return error_response("Could not revoke department permission", 500)
 
+    finally:
+        if connection:
+            connection.close()
+
+
+@app.get("/api/admin/users")
+@jwt_required()
+def admin_list_users():
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            admin = current_user_record(cursor)
+            if not admin or not admin["is_active"] or admin["role"] != "admin":
+                return error_response("Admin access required", 403)
+
+            cursor.execute("""
+                SELECT id, name, email, role, is_active,
+                       approval_status, created_at
+                FROM users
+                ORDER BY created_at DESC, id DESC
+            """)
+            users = cursor.fetchall()
+
+        return jsonify({"users": users}), 200
+    except pymysql.MySQLError:
+        app.logger.exception("Could not load users")
+        return error_response("Could not load users", 500)
+    finally:
+        if connection:
+            connection.close()
+@app.get("/api/admin/users/pending")
+@jwt_required()
+def pending_users():
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            admin = current_user_record(cursor)
+            if not require_role(admin, "admin"):
+                return error_response("Admin access required", 403)
+            cursor.execute("""
+                SELECT id, name, email, role, approval_status, created_at
+                FROM users WHERE approval_status = 'pending'
+                ORDER BY created_at ASC
+            """)
+            users = cursor.fetchall()
+        return jsonify({"users": users})
+    finally:
+        if connection:
+            connection.close()
+
+
+@app.patch("/api/admin/users/<int:target_user_id>/approval")
+@jwt_required()
+def update_user_approval(target_user_id):
+    data = request.get_json(silent=True)
+    status = data.get("approval_status") if isinstance(data, dict) else None
+    if status not in ("approved", "rejected"):
+        return error_response("approval_status must be approved or rejected", 400)
+
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            admin = current_user_record(cursor)
+            if not require_role(admin, "admin"):
+                return error_response("Admin access required", 403)
+            cursor.execute("SELECT id, email, approval_status FROM users WHERE id = %s FOR UPDATE", (target_user_id,))
+            target = cursor.fetchone()
+            if not target:
+                return error_response("User not found", 404)
+            cursor.execute("UPDATE users SET approval_status = %s, token_version = token_version + 1 WHERE id = %s", (status, target_user_id))
+            audit(cursor, admin["id"], None, "user_approval_changed", "success", {
+                "target_user_id": target_user_id,
+                "target_email": target["email"],
+                "old_status": target["approval_status"],
+                "new_status": status,
+            })
+        connection.commit()
+        return jsonify({"message": "User approval updated", "user_id": target_user_id, "approval_status": status})
+    except pymysql.MySQLError:
+        if connection:
+            connection.rollback()
+        app.logger.exception("Updating user approval failed")
+        return error_response("Unable to update user approval", 500)
     finally:
         if connection:
             connection.close()
