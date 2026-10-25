@@ -836,4 +836,4 @@ This development diary records the issues and lessons from the project and provi
 
 **Project Repository:** https://github.com/23JR1A0531/TrustVault.git
 
-**Live Demo:** To be added after successful deployment.
+**Live Demo:** https://trust-vault-dusky.vercel.app?utm_source=chatgpt.com
