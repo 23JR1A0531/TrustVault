@@ -1,7 +1,4 @@
-const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  "https://trustvault-api-3dg5.onrender.com/api"
-).replace(/\/$/, "");
+const API_BASE_URL = "https://trustvault-api-3dg5.onrender.com/api";
 async function request(path, options = {}) {
   const {
     token,
