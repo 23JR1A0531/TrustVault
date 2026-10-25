@@ -30,15 +30,19 @@ if not app.config.get("SECRET_KEY") or not app.config.get("JWT_SECRET_KEY"):
 
 CORS(
     app,
-    resources={r"/api/*": {
-        "origins": [
-            "http://localhost:5173",
-            "http://localhost:5174",
-            "http://127.0.0.1:5173",
-            "http://127.0.0.1:5174",
-            "https://trust-vault-m5kth83kc-23jr1a0531.vercel.app"
-        ]
-    }}
+    resources={
+        r"/api/*": {
+            "origins": [
+                "http://localhost:5173",
+                "http://localhost:5174",
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:5174",
+                "https://trust-vault-m5kth83kc-23jr1a0531.vercel.app",
+            ],
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+        }
+    },
 )
 jwt = JWTManager(app)
 
