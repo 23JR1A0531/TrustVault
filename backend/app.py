@@ -59,12 +59,14 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 def get_db_connection():
     return pymysql.connect(
         host=app.config["MYSQL_HOST"],
+        port=int(os.environ.get("MYSQL_PORT", "3306")),
         user=app.config["MYSQL_USER"],
         password=app.config["MYSQL_PASSWORD"],
         database=app.config["MYSQL_DATABASE"],
         cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=5,
+        connect_timeout=10,
         autocommit=False,
+        ssl={"check_hostname": True},
     )
 
 
