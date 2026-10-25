@@ -12,7 +12,7 @@ Evaluator Access
 
 A dedicated demo administrator account will be provided for the Snovasys evaluation team.
 
-Login URL: https://trust-vault-dusky.vercel.app?utm_source=chatgpt.com
+Login URL: https://trust-vault-dusky.vercel.app
 
 Email: yamuna1654@gmail.com
 
