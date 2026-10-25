@@ -1,13 +1,7 @@
-
 const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  "http://127.0.0.1:5000/api"
-).replace(/\/+$/, "");
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000/api"
+).replace(/\/$/, "");
 
-/**
- * Common API request handler.
- * Supports JSON, FormData uploads, and blob downloads.
- */
 async function request(path, options = {}) {
   const {
     token,
@@ -42,7 +36,7 @@ async function request(path, options = {}) {
     });
   } catch {
     throw new Error(
-      "Unable to connect to the server. Check that the backend is running."
+      "Unable to connect to TrustVault API. Check whether the backend is running."
     );
   }
 
@@ -51,38 +45,20 @@ async function request(path, options = {}) {
 
     try {
       const data = await response.json();
-
       message =
         data.message ||
         data.error ||
         data.detail ||
         message;
     } catch {
-      // Preserve the original HTTP error message.
-    }
-
-    if (response.status === 401) {
-      throw new Error(
-        "Session expired or authentication failed. Please log in again."
-      );
-    }
-
-    if (response.status === 403) {
-      throw new Error(
-        message || "You do not have permission to perform this action."
-      );
+      // Keep the default HTTP error message.
     }
 
     throw new Error(message);
   }
 
-  if (response.status === 204) {
-    return null;
-  }
-
-  if (blob) {
-    return response.blob();
-  }
+  if (blob) return response.blob();
+  if (response.status === 204) return null;
 
   const contentType = response.headers.get("content-type") || "";
 
@@ -92,6 +68,8 @@ async function request(path, options = {}) {
 
   return response.text();
 }
+
+const idPath = (id) => encodeURIComponent(id);
 
 export const api = {
   // Authentication
@@ -111,22 +89,23 @@ export const api = {
     request("/auth/me", { token }),
 
   logout: (token) =>
-    request("/logout-all", {
+    request("/auth/logout-all", {
       method: "POST",
       token,
+      body: {},
     }),
 
   health: () =>
     request("/health"),
 
   // Documents
-  documents: (token, search = "") => {
-    const query = search.trim()
-      ? `?search=${encodeURIComponent(search.trim())}`
-      : "";
-
-    return request(`/documents${query}`, { token });
-  },
+  documents: (token, search = "") =>
+    request(
+      `/documents${
+        search ? `?search=${encodeURIComponent(search)}` : ""
+      }`,
+      { token }
+    ),
 
   upload: (token, formData) =>
     request("/documents", {
@@ -137,46 +116,72 @@ export const api = {
     }),
 
   download: (token, id) =>
-    request(`/documents/${encodeURIComponent(id)}/download`, {
+    request(`/documents/${idPath(id)}/download`, {
       token,
       blob: true,
     }),
 
   edit: (token, id, data) =>
-    request(`/documents/${encodeURIComponent(id)}`, {
+    request(`/documents/${idPath(id)}`, {
       method: "PATCH",
       token,
       body: data,
     }),
 
   remove: (token, id) =>
-    request(`/documents/${encodeURIComponent(id)}`, {
+    request(`/documents/${idPath(id)}`, {
       method: "DELETE",
       token,
     }),
 
-  // Document permissions
+  // Direct user permissions
   grantUser: (token, id, data) =>
-    request(`/documents/${encodeURIComponent(id)}/permissions`, {
+    request(`/documents/${idPath(id)}/permissions`, {
       method: "PUT",
       token,
       body: data,
     }),
 
-  grantGroup: (token, id, data) =>
-    request(`/documents/${encodeURIComponent(id)}/group-permissions`, {
-      method: "PUT",
-      token,
-      body: data,
-    }),
-
-  grantDepartment: (token, id, data) =>
+  revokeUser: (token, documentId, userId) =>
     request(
-      `/documents/${encodeURIComponent(id)}/department-permissions`,
+      `/documents/${idPath(documentId)}/permissions/${idPath(userId)}`,
       {
-        method: "PUT",
+        method: "DELETE",
         token,
-        body: data,
+      }
+    ),
+
+  // Group permissions
+  grantGroup: (token, id, data) =>
+    request(`/documents/${idPath(id)}/group-permissions`, {
+      method: "PUT",
+      token,
+      body: data,
+    }),
+
+  revokeGroup: (token, documentId, groupId) =>
+    request(
+      `/documents/${idPath(documentId)}/group-permissions/${idPath(groupId)}`,
+      {
+        method: "DELETE",
+        token,
+      }
+    ),
+
+  // Department permissions
+  grantDepartment: (token, id, data) =>
+    request(`/documents/${idPath(id)}/department-permissions`, {
+      method: "PUT",
+      token,
+      body: data,
+    }),
+
+  revokeDepartment: (token, documentId, departmentId) =>
+    request(
+      `/documents/${idPath(documentId)}/department-permissions/${idPath(departmentId)}`,
+      {
+        method: "DELETE",
+        token,
       }
     ),
 
@@ -191,12 +196,34 @@ export const api = {
       body: data,
     }),
 
+  updateGroup: (token, id, data) =>
+    request(`/groups/${idPath(id)}`, {
+      method: "PATCH",
+      token,
+      body: data,
+    }),
+
+  deleteGroup: (token, id) =>
+    request(`/groups/${idPath(id)}`, {
+      method: "DELETE",
+      token,
+    }),
+
   addGroupMember: (token, id, data) =>
-    request(`/groups/${encodeURIComponent(id)}/members`, {
+    request(`/groups/${idPath(id)}/members`, {
       method: "POST",
       token,
       body: data,
     }),
+
+  removeGroupMember: (token, groupId, userId) =>
+    request(
+      `/groups/${idPath(groupId)}/members/${idPath(userId)}`,
+      {
+        method: "DELETE",
+        token,
+      }
+    ),
 
   // Departments
   departments: (token) =>
@@ -209,6 +236,19 @@ export const api = {
       body: data,
     }),
 
+  updateDepartment: (token, id, data) =>
+    request(`/departments/${idPath(id)}`, {
+      method: "PATCH",
+      token,
+      body: data,
+    }),
+
+  deleteDepartment: (token, id) =>
+    request(`/departments/${idPath(id)}`, {
+      method: "DELETE",
+      token,
+    }),
+
   departmentMembers: (token) =>
     request("/department-members", { token }),
 
@@ -219,35 +259,53 @@ export const api = {
       body: data,
     }),
 
-  // Audit trail
-  audit: (token) =>
-    request("/admin/audit", { token }),
-
-  verifyAudit: (token) =>
-    request("/admin/audit/verify", { token }),
+  removeDepartmentMember: (token, userId, departmentId) =>
+    request(
+      `/department-members/${idPath(userId)}/${idPath(departmentId)}`,
+      {
+        method: "DELETE",
+        token,
+      }
+    ),
 
   // Admin user management
   adminUsers: (token) =>
     request("/admin/users", { token }),
 
+  searchActiveUsers: (token, search = "") =>
+    request(
+      `/admin/users/active?search=${encodeURIComponent(search)}`,
+      { token }
+    ),
+
+  pendingUsers: (token) =>
+    request("/admin/users/pending", { token }),
+
   updateUser: (token, id, data) =>
-    request(`/admin/users/${encodeURIComponent(id)}`, {
+    request(`/admin/users/${idPath(id)}/role`, {
       method: "PATCH",
       token,
       body: data,
     }),
 
   approveUser: (token, id) =>
-    request(`/admin/users/${encodeURIComponent(id)}/approve`, {
-      method: "POST",
+    request(`/admin/users/${idPath(id)}/approval`, {
+      method: "PATCH",
       token,
-      body: {},
+      body: { approval_status: "approved" },
     }),
 
   rejectUser: (token, id) =>
-    request(`/admin/users/${encodeURIComponent(id)}/reject`, {
-      method: "POST",
+    request(`/admin/users/${idPath(id)}/approval`, {
+      method: "PATCH",
       token,
-      body: {},
+      body: { approval_status: "rejected" },
     }),
+
+  // Audit trail
+  audit: (token) =>
+    request("/admin/audit", { token }),
+
+  verifyAudit: (token) =>
+    request("/admin/audit/verify", { token }),
 };

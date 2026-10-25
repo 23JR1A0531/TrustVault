@@ -43,7 +43,15 @@ jwt = JWTManager(app)
 
 STORAGE_DIR = Path(app.config["STORAGE_DIR"]).resolve()
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+ALLOWED_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt",
+    ".xls", ".xlsx", ".csv", ".ods",
+    ".ppt", ".pptx", ".odp",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+    ".tif", ".tiff",
+    ".zip", ".7z", ".rar", ".tar", ".gz",
+    ".json", ".xml", ".md"
+}
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
@@ -76,7 +84,8 @@ def current_user_record(cursor):
 
 
 def require_role(user, *roles):
-    return bool(user and user["is_active"] and user.get("approval_status", "approved") == "approved" and user["role"] in roles)
+    # Access is controlled by active status and role, not registration approval.
+    return bool(user and user["is_active"] and user["role"] in roles)
 
 
 def audit(cursor, actor_id, document_id, action, outcome, details=None):
@@ -240,24 +249,24 @@ def register():
             cursor.execute(
                 """
                 INSERT INTO users (name, email, password_hash, role, approval_status)
-                VALUES (%s, %s, %s, 'viewer', 'pending')
+                VALUES (%s, %s, %s, 'viewer', 'approved')
                 """,
                 (name, email, generate_password_hash(password)),
             )
             user_id = cursor.lastrowid
             audit(cursor, None, None, "user_registered", "success", {
-                "target_user_id": user_id, "email": email, "approval_status": "pending"
+                "target_user_id": user_id, "email": email, "approval_status": "approved"
             })
 
         connection.commit()
         return jsonify({
-            "message": "Registration submitted. Wait for admin approval before signing in.",
+            "message": "Registration successful. You can now sign in.",
             "user": {
                 "id": user_id,
                 "name": name,
                 "email": email,
                 "role": "viewer",
-                "approval_status": "pending",
+                "approval_status": "approved",
             },
         }), 201
 
@@ -305,11 +314,6 @@ def login():
             return error_response("Invalid email or password", 401)
         if not user["is_active"]:
             return error_response("Account is inactive. Contact the administrator.", 403)
-        if user.get("approval_status", "approved") == "pending":
-            return error_response("Your account is pending admin approval.", 403)
-        if user.get("approval_status") == "rejected":
-            return error_response("Your registration was rejected. Contact the administrator.", 403)
-
         token = create_access_token(
             identity=str(user["id"]),
             additional_claims={"token_version": user["token_version"]},
@@ -380,7 +384,7 @@ def token_revoked(_header, payload):
         connection = get_db_connection()
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT token_version, is_active, approval_status FROM users WHERE id = %s",
+                "SELECT token_version, is_active FROM users WHERE id = %s",
                 (int(payload["sub"]),),
             )
             user = cursor.fetchone()
@@ -388,7 +392,6 @@ def token_revoked(_header, payload):
         return (
             not user
             or not user["is_active"]
-            or user.get("approval_status", "approved") != "approved"
             or user["token_version"] != payload.get("token_version")
         )
 
@@ -464,10 +467,17 @@ def list_departments():
             if not require_role(user, "admin"):
                 return error_response("Admin access required", 403)
 
-            cursor.execute(
-                "SELECT id, name, created_at FROM departments ORDER BY name"
-            )
+            cursor.execute("SELECT id, name, created_at FROM departments ORDER BY name")
             rows = cursor.fetchall()
+            for department in rows:
+                cursor.execute("""
+                    SELECT u.id AS user_id, u.name, u.email
+                    FROM department_memberships dm
+                    JOIN users u ON u.id = dm.user_id
+                    WHERE dm.department_id = %s
+                    ORDER BY u.name
+                """, (department["id"],))
+                department["members"] = cursor.fetchall()
 
         return jsonify({"departments": rows})
     finally:
@@ -510,6 +520,85 @@ def create_department():
             connection.close()
 
 
+@app.patch("/api/departments/<int:department_id>")
+@app.put("/api/departments/<int:department_id>")
+@jwt_required()
+def update_department(department_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data or set(data) - {"name"}:
+        return error_response("Provide a department name to update", 400)
+
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+        return error_response("Department name required (max 100 characters)", 400)
+
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            actor = current_user_record(cursor)
+            if not require_role(actor, "admin"):
+                return error_response("Admin access required", 403)
+
+            cursor.execute("SELECT id FROM departments WHERE id=%s FOR UPDATE", (department_id,))
+            if not cursor.fetchone():
+                return error_response("Department not found", 404)
+
+            cursor.execute(
+                "UPDATE departments SET name=%s WHERE id=%s",
+                (name.strip(), department_id),
+            )
+            audit(cursor, actor["id"], None, "department_updated", "success", {
+                "department_id": department_id,
+                "name": name.strip(),
+            })
+
+        connection.commit()
+        return jsonify({"message": "Department updated", "department_id": department_id, "name": name.strip()})
+    except pymysql.err.IntegrityError:
+        if connection:
+            connection.rollback()
+        return error_response("A department with this name already exists", 409)
+    except pymysql.MySQLError:
+        if connection:
+            connection.rollback()
+        app.logger.exception("Department update failed")
+        return error_response("Could not update department", 500)
+    finally:
+        if connection:
+            connection.close()
+
+
+@app.delete("/api/departments/<int:department_id>")
+@jwt_required()
+def delete_department(department_id):
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            actor = current_user_record(cursor)
+            if not require_role(actor, "admin"):
+                return error_response("Admin access required", 403)
+            cursor.execute("SELECT id, name FROM departments WHERE id=%s", (department_id,))
+            department = cursor.fetchone()
+            if not department:
+                return error_response("Department not found", 404)
+            # Remove dependent grants/memberships, and detach groups before deleting.
+            cursor.execute("DELETE FROM department_document_permissions WHERE department_id=%s", (department_id,))
+            cursor.execute("DELETE FROM department_memberships WHERE department_id=%s", (department_id,))
+            cursor.execute("UPDATE access_groups SET department_id=NULL WHERE department_id=%s", (department_id,))
+            cursor.execute("DELETE FROM departments WHERE id=%s", (department_id,))
+            audit(cursor, actor["id"], None, "department_deleted", "success", {"department_id": department_id, "name": department["name"]})
+        connection.commit()
+        return jsonify({"message": "Department deleted"})
+    except pymysql.MySQLError:
+        if connection: connection.rollback()
+        app.logger.exception("Department deletion failed")
+        return error_response("Could not delete department", 500)
+    finally:
+        if connection: connection.close()
+
+
 @app.get("/api/department-members")
 @jwt_required()
 def list_department_members():
@@ -549,10 +638,11 @@ def list_department_members():
 def assign_department_member():
     data = request.get_json(silent=True) or {}
     email = data.get("email")
+    user_id = data.get("user_id")
     department_id = data.get("department_id")
 
-    if not isinstance(email, str) or not email.strip():
-        return error_response("Employee email is required", 400)
+    if not (isinstance(email, str) and email.strip()) and not user_id:
+        return error_response("Employee email or user_id is required", 400)
 
     try:
         department_id = int(department_id)
@@ -569,10 +659,12 @@ def assign_department_member():
             if not require_role(actor, "admin"):
                 return error_response("Admin access required", 403)
 
-            cursor.execute(
-                "SELECT id, is_active FROM users WHERE email = %s",
-                (email.strip().lower(),),
-            )
+            if user_id:
+                try: user_id = int(user_id)
+                except (TypeError, ValueError): return error_response("Valid user_id required", 400)
+                cursor.execute("SELECT id, is_active, approval_status FROM users WHERE id=%s", (user_id,))
+            else:
+                cursor.execute("SELECT id, is_active, approval_status FROM users WHERE email=%s", (email.strip().lower(),))
             employee = cursor.fetchone()
 
             cursor.execute(
@@ -692,6 +784,15 @@ def list_groups():
                 ORDER BY g.name
             """)
             groups = cursor.fetchall()
+            for group in groups:
+                cursor.execute("""
+                    SELECT u.id AS user_id, u.name, u.email
+                    FROM group_memberships gm
+                    JOIN users u ON u.id = gm.user_id
+                    WHERE gm.group_id = %s
+                    ORDER BY u.name
+                """, (group["id"],))
+                group["members"] = cursor.fetchall()
 
         return jsonify({"groups": groups})
     finally:
@@ -754,14 +855,134 @@ def create_group():
             connection.close()
 
 
+@app.patch("/api/groups/<int:group_id>")
+@app.put("/api/groups/<int:group_id>")
+@jwt_required()
+def update_group(group_id):
+    data = request.get_json(silent=True)
+    allowed_fields = {"name", "description", "department_id"}
+    if not isinstance(data, dict) or not data or set(data) - allowed_fields:
+        return error_response("Provide name, description, and/or department_id to update", 400)
+
+    updates = []
+    values = []
+    audit_details = {"group_id": group_id}
+
+    if "name" in data:
+        name = data["name"]
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+            return error_response("Group name required (max 100 characters)", 400)
+        updates.append("name=%s")
+        values.append(name.strip())
+        audit_details["name"] = name.strip()
+
+    if "description" in data:
+        description = data["description"]
+        if not isinstance(description, str) or len(description) > 500:
+            return error_response("Description must be at most 500 characters", 400)
+        updates.append("description=%s")
+        values.append(description.strip())
+        audit_details["description"] = description.strip()
+
+    if "department_id" in data:
+        department_id = data["department_id"]
+        if department_id in ("", None):
+            department_id = None
+        else:
+            try:
+                if isinstance(department_id, bool):
+                    raise ValueError
+                department_id = int(department_id)
+                if department_id <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return error_response("department_id must be a positive integer or null", 400)
+        updates.append("department_id=%s")
+        values.append(department_id)
+        audit_details["department_id"] = department_id
+
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            actor = current_user_record(cursor)
+            if not require_role(actor, "admin", "owner"):
+                return error_response("Owner or admin access required", 403)
+
+            cursor.execute("SELECT id FROM access_groups WHERE id=%s FOR UPDATE", (group_id,))
+            if not cursor.fetchone():
+                return error_response("Group not found", 404)
+
+            if "department_id" in data and department_id is not None:
+                cursor.execute("SELECT id FROM departments WHERE id=%s", (department_id,))
+                if not cursor.fetchone():
+                    return error_response("Department not found", 404)
+
+            values.append(group_id)
+            cursor.execute(
+                f"UPDATE access_groups SET {', '.join(updates)} WHERE id=%s",
+                values,
+            )
+            audit(cursor, actor["id"], None, "group_updated", "success", audit_details)
+
+        connection.commit()
+        return jsonify({"message": "Group updated", "group_id": group_id})
+    except pymysql.err.IntegrityError:
+        if connection:
+            connection.rollback()
+        return error_response("A group with this name already exists or the department reference is invalid", 409)
+    except pymysql.MySQLError:
+        if connection:
+            connection.rollback()
+        app.logger.exception("Group update failed")
+        return error_response("Could not update group", 500)
+    finally:
+        if connection:
+            connection.close()
+
+
+@app.delete("/api/groups/<int:group_id>")
+@jwt_required()
+def delete_group(group_id):
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            actor = current_user_record(cursor)
+            if not require_role(actor, "admin", "owner"):
+                return error_response("Owner or admin access required", 403)
+            cursor.execute("SELECT id, name FROM access_groups WHERE id=%s", (group_id,))
+            group = cursor.fetchone()
+            if not group:
+                return error_response("Group not found", 404)
+            cursor.execute("DELETE FROM group_document_permissions WHERE group_id=%s", (group_id,))
+            cursor.execute("DELETE FROM group_memberships WHERE group_id=%s", (group_id,))
+            # This child table has a restrictive FK to access_groups.
+            cursor.execute("DELETE FROM group_permission_audit WHERE group_id=%s", (group_id,))
+            # Keep the main audit log entry for the group deletion.
+            audit(cursor, actor["id"], None, "group_deleted", "success", {
+                "group_id": group_id,
+                "name": group["name"],
+            })
+            cursor.execute("DELETE FROM access_groups WHERE id=%s", (group_id,))
+        connection.commit()
+        return jsonify({"message": "Group deleted"})
+    except pymysql.MySQLError:
+        if connection: connection.rollback()
+        app.logger.exception("Group deletion failed")
+        return error_response("Could not delete group", 500)
+    finally:
+        if connection: connection.close()
+
+
 @app.post("/api/groups/<int:group_id>/members")
 @jwt_required()
 def add_group_member(group_id):
     data = request.get_json(silent=True) or {}
     email = data.get("email")
-
-    if not isinstance(email, str) or not email.strip():
-        return error_response("Employee email required", 400)
+    user_id = data.get("user_id")
+    if not (isinstance(email, str) and email.strip()) and not user_id:
+        return error_response("Registered user email or user_id required", 400)
 
     connection = None
     try:
@@ -771,16 +992,14 @@ def add_group_member(group_id):
             if not require_role(actor, "admin"):
                 return error_response("Admin access required", 403)
 
-            cursor.execute(
-                "SELECT id FROM access_groups WHERE id = %s",
-                (group_id,),
-            )
+            cursor.execute("SELECT id FROM access_groups WHERE id = %s", (group_id,))
             group = cursor.fetchone()
-
-            cursor.execute(
-                "SELECT id, is_active FROM users WHERE email = %s",
-                (email.strip().lower(),),
-            )
+            if user_id:
+                try: user_id = int(user_id)
+                except (TypeError, ValueError): return error_response("Valid user_id required", 400)
+                cursor.execute("SELECT id, is_active, approval_status FROM users WHERE id=%s", (user_id,))
+            else:
+                cursor.execute("SELECT id, is_active, approval_status FROM users WHERE email=%s", (email.strip().lower(),))
             member = cursor.fetchone()
 
             if not group or not member or not member["is_active"]:
@@ -883,21 +1102,16 @@ def upload_document():
             return error_response("Category or description is too long", 400)
 
         ext = Path(uploaded.filename).suffix.lower()
+
         if ext not in ALLOWED_EXTENSIONS:
-            return error_response("Only PDF, PNG and JPEG files are allowed", 415)
+            return error_response("This file type is not supported", 415)
 
         content = uploaded.read(MAX_FILE_SIZE + 1)
+
         if not content or len(content) > MAX_FILE_SIZE:
-            return error_response("File must be between 1 byte and 10 MB", 413)
-
-        valid = (
-            (ext == ".pdf" and content.startswith(b"%PDF-"))
-            or (ext == ".png" and content.startswith(b"\x89PNG\r\n\x1a\n"))
-            or (ext in {".jpg", ".jpeg"} and content.startswith(b"\xff\xd8\xff"))
-        )
-        if not valid:
-            return error_response("File content does not match its extension", 415)
-
+            return error_response(
+                "File must be between 1 byte and 10 MB", 413
+            )
         storage_key = uuid.uuid4().hex
         stored_path = STORAGE_DIR / storage_key
 
@@ -1150,6 +1364,7 @@ def download_document(document_id):
 
 
 @app.patch("/api/documents/<int:document_id>")
+@app.put("/api/documents/<int:document_id>")
 @jwt_required()
 def edit_document(document_id):
     data = request.get_json(silent=True)
@@ -1193,8 +1408,8 @@ def edit_document(document_id):
                 if not isinstance(value, str) or len(value) > limits[key]:
                     return error_response(f"Invalid {key}", 400)
 
-                if key == "title" and not value.strip():
-                    return error_response("Title cannot be empty", 400)
+                if key in ("title", "category") and not value.strip():
+                    return error_response(f"{key.capitalize()} cannot be empty", 400)
 
                 updates.append(f"{key} = %s")
                 values.append(value.strip())
@@ -1212,7 +1427,7 @@ def edit_document(document_id):
             )
 
         connection.commit()
-        return jsonify({"message": "Document updated"})
+        return jsonify({"message": "Document updated", "document_id": document_id})
 
     except pymysql.MySQLError:
         if connection:
@@ -1241,20 +1456,14 @@ def delete_document(document_id):
             )
             document = cursor.fetchone()
 
-            if (
-                not document
-                or not user
-                or document["owner_id"] != user["id"]
-            ):
-                audit(
-                    cursor,
-                    user["id"] if user else None,
-                    document_id,
-                    "document_delete",
-                    "denied",
-                )
+            if not document or not user or not user["is_active"]:
+                return error_response("Document not found", 404)
+
+            # Document owner or an approved administrator may delete.
+            if document["owner_id"] != user["id"] and not require_role(user, "admin"):
+                audit(cursor, user["id"], document_id, "document_delete", "denied")
                 connection.commit()
-                return error_response("Document not found or delete denied", 404)
+                return error_response("Only the owner or admin can delete this document", 403)
 
             storage_key = document["storage_key"]
 
@@ -1273,6 +1482,17 @@ def delete_document(document_id):
             )
             cursor.execute(
                 "DELETE FROM document_permissions WHERE document_id=%s",
+                (document_id,),
+            )
+
+            # audit_logs has a restrictive FK to documents. Detach the audit
+            # records from the document before deleting it; audit history remains.
+            cursor.execute(
+                "UPDATE audit_logs SET document_id=NULL WHERE document_id=%s",
+                (document_id,),
+            )
+            cursor.execute(
+                "DELETE FROM group_permission_audit WHERE document_id=%s",
                 (document_id,),
             )
             cursor.execute(
@@ -1731,6 +1951,34 @@ def admin_list_users():
     finally:
         if connection:
             connection.close()
+@app.get("/api/admin/users/active")
+@jwt_required()
+def active_users_for_management():
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            actor = current_user_record(cursor)
+            if not require_role(actor, "admin"):
+                return error_response("Admin access required", 403)
+            search = request.args.get("search", "").strip()
+            pattern = f"%{search}%"
+            cursor.execute("""
+                SELECT id, name, email, role
+                FROM users
+                WHERE is_active=1
+                  AND (%s='' OR name LIKE %s OR email LIKE %s)
+                ORDER BY name LIMIT 100
+            """, (search, pattern, pattern))
+            users = cursor.fetchall()
+        return jsonify({"users": users})
+    except pymysql.MySQLError:
+        app.logger.exception("Could not search active users")
+        return error_response("Could not load registered users", 500)
+    finally:
+        if connection: connection.close()
+
+
 @app.get("/api/admin/users/pending")
 @jwt_required()
 def pending_users():
@@ -1791,6 +2039,113 @@ def update_user_approval(target_user_id):
             connection.close()
 
 
+@app.patch("/api/admin/users/<int:target_user_id>/role")
+@jwt_required()
+def update_user_role(target_user_id):
+    data = request.get_json(silent=True)
+    new_role = data.get("role") if isinstance(data, dict) else None
+
+    if new_role not in ("admin", "owner", "viewer"):
+        return error_response(
+            "role must be admin, owner, or viewer", 400
+        )
+
+    connection = None
+    try:
+        connection = get_db_connection()
+
+        with connection.cursor() as cursor:
+            admin = current_user_record(cursor)
+            if not require_role(admin, "admin"):
+                return error_response("Admin access required", 403)
+
+            cursor.execute(
+                """
+                SELECT id, name, email, role, is_active, approval_status
+                FROM users WHERE id = %s FOR UPDATE
+                """,
+                (target_user_id,),
+            )
+            target = cursor.fetchone()
+
+            if not target:
+                return error_response("User not found", 404)
+
+            if target_user_id == admin["id"] and new_role != "admin":
+                return error_response(
+                    "You cannot remove your own admin role", 409
+                )
+
+            old_role = target["role"]
+
+            if old_role == new_role:
+                return jsonify({
+                    "message": "Role unchanged",
+                    "user_id": target_user_id,
+                    "role": new_role,
+                }), 200
+
+            # Prevent removing the last active, approved admin.
+            if old_role == "admin" and (
+                new_role != "admin"
+                or not target["is_active"]
+            ):
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS admin_count
+                    FROM users
+                    WHERE role = 'admin'
+                      AND is_active = 1
+                    """
+                )
+                count = cursor.fetchone()["admin_count"]
+
+                if count <= 1:
+                    return error_response(
+                        "Cannot remove the last active approved admin", 409
+                    )
+
+            cursor.execute(
+                """
+                UPDATE users
+                SET role = %s, token_version = token_version + 1
+                WHERE id = %s
+                """,
+                (new_role, target_user_id),
+            )
+
+            audit(
+                cursor,
+                admin["id"],
+                None,
+                "user_role_changed",
+                "success",
+                {
+                    "target_user_id": target_user_id,
+                    "target_name": target["name"],
+                    "target_email": target["email"],
+                    "old_role": old_role,
+                    "new_role": new_role,
+                },
+            )
+
+        connection.commit()
+        return jsonify({
+            "message": "User role updated",
+            "user_id": target_user_id,
+            "role": new_role,
+        }), 200
+
+    except pymysql.MySQLError:
+        if connection:
+            connection.rollback()
+        app.logger.exception("Updating user role failed")
+        return error_response("Unable to update user role", 500)
+
+    finally:
+        if connection:
+            connection.close()
+
 @app.get("/api/admin/audit")
 @jwt_required()
 def audit_logs():
@@ -1804,10 +2159,24 @@ def audit_logs():
 
             cursor.execute(
                 """
-                SELECT id, actor_id, document_id, action, outcome,
-                       details, previous_hash, entry_hash, created_at
-                FROM audit_logs
-                ORDER BY id DESC
+                SELECT
+                    al.id,
+                    al.actor_id,
+                    actor.name AS actor_name,
+                    actor.email AS actor_email,
+                    al.document_id,
+                    d.title AS document_title,
+                    d.original_filename,
+                    al.action,
+                    al.outcome,
+                    al.details,
+                    al.previous_hash,
+                    al.entry_hash,
+                    al.created_at
+                FROM audit_logs AS al
+                LEFT JOIN users AS actor ON actor.id = al.actor_id
+                LEFT JOIN documents AS d ON d.id = al.document_id
+                ORDER BY al.id DESC
                 LIMIT 500
                 """
             )
