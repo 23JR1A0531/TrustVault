@@ -38,6 +38,7 @@ CORS(
                 "http://127.0.0.1:5173",
                 "http://127.0.0.1:5174",
                 "https://trust-vault-m5kth83kc-23jr1a0531.vercel.app",
+                "https://trust-vault-dusky.vercel.app",
             ],
             "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
